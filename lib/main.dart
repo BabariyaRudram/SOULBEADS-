@@ -1,11 +1,14 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // The app name lives here. Change it in one place.
 const String kAppName = 'SoulBeads';
 const int kMalaSize = 108;
+const List<String> kCats = ['Names', 'Mantras', 'My own'];
 
 class JapItem {
   final String title;
@@ -41,41 +44,140 @@ const List<JapItem> kMantras = [
   JapItem('Vasudeva Mantra', 'ॐ नमो भगवते वासुदेवाय॥'),
 ];
 
-void main() => runApp(const SoulBeadsApp());
+class AppThemeData {
+  final String name;
+  final Color seed;
+  final Brightness brightness;
+  final Color background;
+  const AppThemeData(this.name, this.seed, this.brightness, this.background);
+}
 
-class SoulBeadsApp extends StatelessWidget {
-  const SoulBeadsApp({super.key});
+const List<AppThemeData> kThemes = [
+  AppThemeData(
+      'Saffron', Colors.deepOrange, Brightness.light, Color(0xFFFFF8F0)),
+  AppThemeData('Dark gold', Colors.amber, Brightness.dark, Color(0xFF14110C)),
+  AppThemeData('White', Colors.indigo, Brightness.light, Colors.white),
+];
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  runApp(SoulBeadsApp(prefs: prefs));
+}
+
+class SoulBeadsApp extends StatefulWidget {
+  final SharedPreferences prefs;
+  const SoulBeadsApp({super.key, required this.prefs});
+
+  @override
+  State<SoulBeadsApp> createState() => _SoulBeadsAppState();
+}
+
+class _SoulBeadsAppState extends State<SoulBeadsApp> {
+  late int _themeIndex = _safeTheme(widget.prefs.getInt('theme'));
+
+  int _safeTheme(int? i) => (i != null && i >= 0 && i < kThemes.length) ? i : 0;
+
+  void _setTheme(int i) {
+    setState(() => _themeIndex = i);
+    widget.prefs.setInt('theme', i);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final t = kThemes[_themeIndex];
     return MaterialApp(
       title: kAppName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorSchemeSeed: Colors.deepOrange,
-        scaffoldBackgroundColor: const Color(0xFFFFF8F0),
+        colorSchemeSeed: t.seed,
+        brightness: t.brightness,
+        scaffoldBackgroundColor: t.background,
         useMaterial3: true,
       ),
-      home: const JapPage(),
+      home: JapPage(prefs: widget.prefs, onTheme: _setTheme),
     );
   }
 }
 
 class JapPage extends StatefulWidget {
-  const JapPage({super.key});
+  final SharedPreferences prefs;
+  final void Function(int) onTheme;
+  const JapPage({super.key, required this.prefs, required this.onTheme});
 
   @override
   State<JapPage> createState() => _JapPageState();
 }
 
 class _JapPageState extends State<JapPage> {
-  JapItem _item = kNames[1];
+  late JapItem _item;
+  List<JapItem> _custom = [];
+  int _cat = 0;
   bool _groupMode = false;
   int _count = 0;
   int _target = 108;
   bool _vibrate = true;
 
+  @override
+  void initState() {
+    super.initState();
+    final p = widget.prefs;
+    _custom = _loadCustom(p);
+    _count = p.getInt('count') ?? 0;
+    _target = p.getInt('target') ?? 108;
+    _vibrate = p.getBool('vibrate') ?? true;
+    _groupMode = p.getBool('group') ?? false;
+    _item = _findByTitle(p.getString('item')) ?? kNames[1];
+    _cat = kMantras.contains(_item) ? 1 : (_custom.contains(_item) ? 2 : 0);
+  }
+
+  JapItem _fromJson(Map<String, dynamic> m) =>
+      JapItem(m['t'] as String, m['x'] as String?);
+
+  List<JapItem> _loadCustom(SharedPreferences p) {
+    final raw = p.getString('custom');
+    if (raw == null) return [];
+    try {
+      final list = jsonDecode(raw) as List<dynamic>;
+      return [for (final e in list) _fromJson(e as Map<String, dynamic>)];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  JapItem? _findByTitle(String? t) {
+    if (t == null) return null;
+    for (final it in [...kNames, ...kMantras, ..._custom]) {
+      if (it.title == t) return it;
+    }
+    return null;
+  }
+
+  void _persist() {
+    final p = widget.prefs;
+    p.setInt('count', _count);
+    p.setInt('target', _target);
+    p.setBool('vibrate', _vibrate);
+    p.setBool('group', _groupMode);
+    p.setString('item', _item.title);
+  }
+
+  void _persistCustom() {
+    widget.prefs.setString(
+      'custom',
+      jsonEncode([
+        for (final c in _custom) {'t': c.title, 'x': c.text}
+      ]),
+    );
+  }
+
   JapItem get _shown => _groupMode ? kNames[_count % kNames.length] : _item;
+
+  List<JapItem> _itemsFor(int cat) {
+    if (cat == 0) return kNames;
+    if (cat == 1) return kMantras;
+    return _custom;
+  }
 
   void _tap() {
     setState(() => _count++);
@@ -91,21 +193,21 @@ class _JapPageState extends State<JapPage> {
         SnackBar(content: Text('Target of $_target complete 🙏')),
       );
     }
+    _persist();
   }
 
-  void _reset() => setState(() => _count = 0);
+  void _reset() {
+    setState(() => _count = 0);
+    _persist();
+  }
 
-  Future<void> _openList() async {
-    final JapItem? picked = await Navigator.of(context).push<JapItem>(
-      MaterialPageRoute<JapItem>(builder: (_) => const ListPage()),
-    );
-    if (picked != null) {
-      setState(() {
-        _item = picked;
-        _groupMode = false;
-        _count = 0;
-      });
-    }
+  void _select(JapItem item) {
+    setState(() {
+      _item = item;
+      _groupMode = false;
+      _count = 0;
+    });
+    _persist();
   }
 
   Future<void> _customTarget() async {
@@ -135,7 +237,144 @@ class _JapPageState extends State<JapPage> {
     final int? n = int.tryParse(result ?? '');
     if (n != null && n > 0) {
       setState(() => _target = n);
+      _persist();
     }
+  }
+
+  Future<void> _addCustom() async {
+    final titleC = TextEditingController();
+    final textC = TextEditingController();
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add your own'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: titleC,
+                autofocus: true,
+                decoration:
+                    const InputDecoration(labelText: 'Name or mantra title'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: textC,
+                minLines: 2,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                    labelText: 'Mantra text (optional)'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    final title = titleC.text.trim();
+    if (ok == true && title.isNotEmpty) {
+      final text = textC.text.trim();
+      final item = JapItem(title, text.isEmpty ? null : text);
+      setState(() {
+        _custom = [..._custom, item];
+        _cat = 2;
+      });
+      _persistCustom();
+      _select(item);
+    }
+  }
+
+  Future<void> _confirmDelete(JapItem it) async {
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete "${it.title}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      setState(() {
+        _custom = _custom.where((c) => !identical(c, it)).toList();
+        if (identical(_item, it)) {
+          _item = kNames[1];
+          _groupMode = false;
+          _count = 0;
+        }
+      });
+      _persistCustom();
+      _persist();
+    }
+  }
+
+  Widget _card(JapItem item, {VoidCallback? onLong}) {
+    final cs = Theme.of(context).colorScheme;
+    final selected = identical(item, _shown);
+    return GestureDetector(
+      onTap: () => _select(item),
+      onLongPress: onLong,
+      child: Container(
+        width: 130,
+        margin: const EdgeInsets.only(right: 10),
+        padding: const EdgeInsets.all(12),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? cs.primaryContainer : cs.surface,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: selected ? cs.primary : cs.outlineVariant,
+            width: selected ? 2 : 1,
+          ),
+        ),
+        child: Text(
+          item.title,
+          textAlign: TextAlign.center,
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _addCard() {
+    final cs = Theme.of(context).colorScheme;
+    return GestureDetector(
+      onTap: _addCustom,
+      child: Container(
+        width: 110,
+        margin: const EdgeInsets.only(right: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: cs.primary),
+        ),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [Icon(Icons.add), Text('Add own')],
+        ),
+      ),
+    );
   }
 
   Widget _targetChips() {
@@ -149,7 +388,10 @@ class _JapPageState extends State<JapPage> {
           ChoiceChip(
             label: Text('$t'),
             selected: _target == t,
-            onSelected: (_) => setState(() => _target = t),
+            onSelected: (_) {
+              setState(() => _target = t);
+              _persist();
+            },
           ),
         ChoiceChip(
           label: Text(isCustom ? 'Custom: $_target' : 'Custom'),
@@ -174,15 +416,22 @@ class _JapPageState extends State<JapPage> {
         backgroundColor: Colors.transparent,
         scrolledUnderElevation: 0,
         actions: [
+          PopupMenuButton<int>(
+            tooltip: 'Theme',
+            icon: const Icon(Icons.palette_outlined),
+            onSelected: widget.onTheme,
+            itemBuilder: (_) => [
+              for (int i = 0; i < kThemes.length; i++)
+                PopupMenuItem(value: i, child: Text(kThemes[i].name)),
+            ],
+          ),
           IconButton(
             tooltip: 'Vibration',
             icon: Icon(_vibrate ? Icons.vibration : Icons.mobile_off),
-            onPressed: () => setState(() => _vibrate = !_vibrate),
-          ),
-          IconButton(
-            tooltip: 'Names and mantras',
-            icon: const Icon(Icons.list_alt),
-            onPressed: _openList,
+            onPressed: () {
+              setState(() => _vibrate = !_vibrate);
+              _persist();
+            },
           ),
           IconButton(
             tooltip: 'Reset',
@@ -202,11 +451,45 @@ class _JapPageState extends State<JapPage> {
                   ButtonSegment(value: true, label: Text('Name group')),
                 ],
                 selected: {_groupMode},
-                onSelectionChanged: (s) => setState(() {
-                  _groupMode = s.first;
-                  _count = 0;
-                }),
+                onSelectionChanged: (s) {
+                  setState(() {
+                    _groupMode = s.first;
+                    _count = 0;
+                  });
+                  _persist();
+                },
               ),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (int i = 0; i < kCats.length; i++)
+                    ChoiceChip(
+                      label: Text(kCats[i]),
+                      selected: _cat == i,
+                      onSelected: (_) => setState(() => _cat = i),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 90,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    if (_cat == 2) _addCard(),
+                    for (final it in _itemsFor(_cat))
+                      _card(it,
+                          onLong: _cat == 2 ? () => _confirmDelete(it) : null),
+                  ],
+                ),
+              ),
+              if (_cat == 2 && _custom.isNotEmpty)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: Text('Long-press a card to delete',
+                      style: TextStyle(fontSize: 12)),
+                ),
               const SizedBox(height: 20),
               Text(
                 shown.title,
@@ -291,51 +574,4 @@ class MalaPainter extends CustomPainter {
       old.lit != lit ||
       old.litColor != litColor ||
       old.dimColor != dimColor;
-}
-
-class ListPage extends StatelessWidget {
-  const ListPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Names and mantras')),
-      body: ListView(
-        children: [
-          const _Header('Divine Names'),
-          for (final n in kNames)
-            ListTile(
-              title: Text(n.title, style: const TextStyle(fontSize: 20)),
-              onTap: () => Navigator.pop(context, n),
-            ),
-          const _Header('Mantras'),
-          for (final m in kMantras)
-            ListTile(
-              title: Text(m.title),
-              subtitle: Text(m.text!, maxLines: 2, overflow: TextOverflow.ellipsis),
-              onTap: () => Navigator.pop(context, m),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Header extends StatelessWidget {
-  final String label;
-  const _Header(this.label);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
-        label,
-        style: Theme.of(context)
-            .textTheme
-            .titleMedium
-            ?.copyWith(fontWeight: FontWeight.bold),
-      ),
-    );
-  }
 }
